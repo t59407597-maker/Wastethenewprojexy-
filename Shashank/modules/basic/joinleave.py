@@ -11,8 +11,11 @@ async def join(client: Client, message: Message):
     if len(message.command) > 1 and str(tex).lstrip("-").isdigit():
         try:
             from Shashank.modules.basic.vcfight import _join
+            premium = __import__("Shashank.modules.basic.vcfight", fromlist=["_subscription_active"])._subscription_active(client)
             await _join(client, int(tex))
-            return await message.reply_text(f"✅ **VC joined**\nGroup: `{tex}`")
+            if premium:
+                return await message.reply_text(f"✅ **VC joined**\nGroup: `{tex}`\n\nPremium: multiple VCs enabled.")
+            return await message.reply_text(f"✅ **VC joined**\nGroup: `{tex}`\n\nFree: only one VC at a time.")
         except Exception as ex:
             return await message.reply_text(f"❌ **VC join failed:** `{ex}`")
     g = await message.reply_text("`ᴘʀᴏᴄᴇssɪɴɢ...`")

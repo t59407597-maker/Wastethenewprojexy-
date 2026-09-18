@@ -14,6 +14,7 @@ from pytgcalls import PyTgCalls
 from pytgcalls.types import GroupCallConfig
 
 from Shashank.modules.help import add_command_help
+from Shashank.modules.bot.start import subscriptions_col
 
 log = logging.getLogger(__name__)
 DOWNLOAD_DIR = "downloads"
@@ -31,6 +32,29 @@ class VCState:
 
 _states: Dict[int, VCState] = {}
 _bridges: Dict[int, PyTgCalls] = {}
+
+
+def _subscription_active(client: Client) -> bool:
+    """Return True when the cloned account has an active subscription."""
+    uid = getattr(client, "_waste_owner_uid", None)
+    if not uid:
+        return False
+    try:
+        from datetime import datetime, timezone
+        doc = subscriptions_col.find_one({"_id": int(uid)})
+        if not doc:
+            return False
+        expires = doc.get("expires_at")
+        if not isinstance(expires, datetime):
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires <= datetime.now(timezone.utc):
+            subscriptions_col.delete_one({"_id": int(uid)})
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def _key(client: Client) -> int:
@@ -95,15 +119,38 @@ async def _fight_loop(state: VCState, call: PyTgCalls, target: int, path: str):
 
 async def _join(client: Client, chat_id: int):
     state, call = await _bridge(client)
+    premium = _subscription_active(client)
     async with state.lock:
-        await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
-        state.joined.add(chat_id)
+        # Free accounts are limited to one VC. Joining another VC first
+        # disconnects the currently selected VC. Premium accounts may keep
+        # multiple active VCs at the same time.
+        if not premium:
+            for old_chat_id in list(state.joined):
+                if old_chat_id != chat_id:
+                    try:
+                        await _cancel_fight(state)
+                        await call.leave_call(old_chat_id)
+                    except Exception:
+                        pass
+                    state.joined.discard(old_chat_id)
+            if chat_id not in state.joined:
+                await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
+                state.joined.add(chat_id)
+        else:
+            if chat_id not in state.joined:
+                await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
+                state.joined.add(chat_id)
         state.current = chat_id
 
 @Client.on_message(filters.command("allvc", ".") & filters.me)
 async def all_vc(client: Client, message: Message):
     if len(message.command) < 2 or message.command[1].lower() not in {"join", "leave"}:
         return await message.reply("Usage: `.allvc join` / `.allvc leave`")
+    if not _subscription_active(client):
+        return await message.reply(
+            "🔒 **Premium Required**\n\n"
+            "`.allvc join` / `.allvc leave` subscription ke baad available hai."
+        )
     state, call = await _bridge(client)
     action = message.command[1].lower()
     if action == "leave":
@@ -132,10 +179,14 @@ async def all_vc(client: Client, message: Message):
 @Client.on_message(filters.command("fight", ".") & filters.me)
 async def fight(client: Client, message: Message):
     state, call = await _bridge(client)
-    if not state.current:
+    if not state.joined:
         return await message.reply("❌ Pehle `.join <group_id>` karke VC join karo.")
-    if message.chat and message.chat.id != state.current:
-        return await message.reply(f"❌ Fighting selected VC wale group me chalegi.\nSelected group: `{state.current}`")
+    # For premium accounts, the group where .fight is sent becomes the
+    # selected VC. Free accounts only ever have one joined VC.
+    if message.chat and message.chat.id in state.joined:
+        state.current = message.chat.id
+    elif state.current is None:
+        return await message.reply("❌ Is group ka VC selected/joined nahi hai.")
     replied = message.reply_to_message
     if not replied or not (replied.audio or replied.voice):
         return await message.reply("❌ `.fight` ko audio/voice message ke reply me bhejo.")
@@ -192,9 +243,9 @@ async def vc_status(client: Client, message: Message):
 
 
 add_command_help("VcFight", [
-    ["join", "Join a specific active voice chat: `.join <group_id>`"],
-    ["allvc", "Join or leave all active voice chats: `.allvc join` / `.allvc leave`"],
-    ["fight", "Reply to an audio/voice and repeat it in the selected VC."],
+    ["join", "Free: join one active VC with `.join <group_id>`; Premium: multiple VCs."],
+    ["allvc", "Premium only: join or leave all active voice chats."],
+    ["fight", "Reply to an audio/voice and repeat it in the selected VC only."],
     ["fightstop", "Stop fight audio without leaving the VC."],
     ["vcleave", "Leave the selected VC without using the normal chat-leave command."],
     ["vcstatus", "Show selected/joined VCs and fight status."],
