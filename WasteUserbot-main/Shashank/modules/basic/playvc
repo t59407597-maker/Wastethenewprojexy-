@@ -1,0 +1,126 @@
+import asyncio
+import logging
+import random
+import re
+
+from pyrogram import filters, Client
+from pytgcalls import PyTgCalls, filters as pytgfl
+from pytgcalls.exceptions import NoActiveGroupCall
+from pytgcalls.types import GroupCallConfig, MediaStream, AudioQuality, VideoQuality
+from pytgcalls.types import ChatUpdate, Update
+from youtubesearchpython.__future__ import VideosSearch
+
+# Logging setup
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO,
+                    format="[VCPlugin] %(message)s")
+
+# Initialize call handler via the active Pyrogram client
+call = PyTgCalls(Client)
+call_config = GroupCallConfig(auto_start=False)
+
+# Queues & Active chats
+QUEUE = {}
+ACTIVE_MEDIA_CHATS = set()
+
+async def add_to_queue(chat_id, user, title, duration, link, stream_type):
+    QUEUE.setdefault(chat_id, []).append({
+        "user": user,
+        "title": title,
+        "duration": duration,
+        "link": link,
+        "type": stream_type
+    })
+    return len(QUEUE[chat_id]) - 1
+
+async def change_stream(chat_id):
+    queue = QUEUE.get(chat_id, [])
+    if not queue:
+        await call.leave_call(chat_id)
+        QUEUE.pop(chat_id, None)
+        ACTIVE_MEDIA_CHATS.discard(chat_id)
+        return
+
+    track = queue.pop(0)
+    media = MediaStream(
+        media_path=track['link'],
+        video_flags=MediaStream.Flags.IGNORE if track['type']=="Audio" else None,
+        audio_parameters=AudioQuality.STUDIO,
+        video_parameters=VideoQuality.HD_720p if track['type']=="Video" else None,
+        ytdlp_parameters="--cookies cookies.txt"
+    )
+    await call.play(chat_id, media, config=call_config)
+
+@Client.on_message(filters.command(["play", "vplay"]) & ~filters.private)
+async def play_handler(client: Client, message):
+    chat_id = message.chat.id
+    user = message.from_user or message.sender_chat
+    text = message.text or ""
+    is_video = message.command[0] == "vplay"
+
+    # Handle replied media
+    if message.reply_to_message and (message.reply_to_message.audio or message.reply_to_message.video):
+        obj = message.reply_to_message.audio or message.reply_to_message.video
+        title = getattr(obj, "title", obj.file_name)
+        duration = f"{getattr(obj, 'duration', 0)//60}m"
+        link = await message.reply_to_message.download()
+        stream_type = "Video" if message.reply_to_message.video else "Audio"
+    else:
+        # Search YouTube
+        if len(message.command) < 2:
+            return await message.reply("❗Usage: /play <query> or reply to audio/video.")
+        query = text.split(None,1)[1]
+        results = await VideosSearch(query, limit=1).next()
+        res = results.get("result")
+        if not res:
+            return await message.reply("❌ No results found.")
+        info = res[0]
+        title = info["title"]
+        duration = info.get("duration", "Live")
+        link = info["link"]
+        stream_type = "Video" if is_video else "Audio"
+
+    position = await add_to_queue(chat_id, user, title, duration, link, stream_type)
+
+    try:
+        current = (await call.calls).get(chat_id)
+        if current:
+            return await message.reply(f"✅ Queued at position {position}")
+        else:
+            media = MediaStream(
+                media_path=link,
+                video_flags=MediaStream.Flags.IGNORE if stream_type=="Audio" else None,
+                audio_parameters=AudioQuality.STUDIO,
+                video_parameters=VideoQuality.HD_720p if stream_type=="Video" else None,
+                ytdlp_parameters="--cookies cookies.txt"
+            )
+            await call.play(chat_id, media, config=call_config)
+            ACTIVE_MEDIA_CHATS.add(chat_id)
+            return await message.reply(f"▶️ Now playing: {title}")
+    except NoActiveGroupCall:
+        return await message.reply("❌ No active voice chat. Please start one.")
+
+@Client.on_message(filters.command(["skip", "vskip"]) & ~filters.private)
+async def skip_handler(_, message):
+    await change_stream(message.chat.id)
+    await message.reply("⏭ Skipped to next track")
+
+@Client.on_message(filters.command(["stop", "end"]) & ~filters.private)
+async def stop_handler(_, message):
+    chat_id = message.chat.id
+    await call.leave_call(chat_id)
+    QUEUE.pop(chat_id, None)
+    ACTIVE_MEDIA_CHATS.discard(chat_id)
+    await message.reply("⏹ Stopped and left voice chat")
+
+@call.on_update(pytgfl.chat_update(ChatUpdate.Status.CLOSED_VOICE_CHAT))
+@call.on_update(pytgfl.chat_update(ChatUpdate.Status.LEFT_GROUP))
+@call.on_update(pytgfl.chat_update(ChatUpdate.Status.KICKED))
+async def vc_leave(_, update: Update):
+    await call.leave_call(update.chat_id)
+    QUEUE.pop(update.chat_id, None)
+    ACTIVE_MEDIA_CHATS.discard(update.chat_id)
+
+@call.on_update(pytgfl.stream_end())
+async def vc_stream_end(_, update: Update):
+    await change_stream(update.chat_id)

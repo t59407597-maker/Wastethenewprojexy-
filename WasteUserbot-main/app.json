@@ -1,0 +1,35 @@
+{
+    "name": "sᴛʀᴀɴɢᴇʀ ᴜsᴇʀʙᴏᴛ",
+    "logo": "https://files.catbox.moe/r58nec.jpg",
+    "description": "ᴀɴ ғɪʀsᴛ ᴛᴇʟᴇɢʀᴀᴍ ᴜsᴇʀʙᴏᴛ ᴡɪᴛʜ ᴍᴜʟᴛɪ ᴄʟɪᴇɴᴛs ғᴏʀ sᴘᴀᴍᴍɪɴɢ ᴏʀ ᴍᴀss.",
+    "keywords": ["pyrogram", "userbot"],
+    "repository": "https://github.com/itzshukla/USERBOT",
+  "stack": "container",
+    "env": {
+        "STRING_SESSION1": {
+            "description": "ғɪʟʟ ᴡɪᴛʜ ᴛʜᴇ ᴛᴇʟᴇᴛʜᴏɴ sᴇssɪᴏɴ sᴛʀɪɴɢ",
+            "required": true
+        },
+        "MONGO_URL": {
+            "description": "ғɪʟʟ ᴛʜᴇʀᴇ ᴀɴ ᴍᴏɴɢᴏ ᴅᴀᴛᴀʙᴀsᴇ ғʀᴏᴍ mongodb.com",
+            "required": true,
+            "value": "mongodb+srv://Krishna:pss968048@cluster0.4rfuzro.mongodb.net/?retryWrites=true&w=majority"
+        },
+        "SUDO_USERS": {
+            "description": "ᴅᴏɴ'ᴛ ᴄʜᴀɴɢᴇ ᴛʜɪs ᴛʜᴇʀᴇ /ɪᴅ",
+            "required": true,
+            "value": "6762113050 6919199044"
+        },
+        "OWNER_ID": {
+            "description": "ғɪʟʟ ᴛʜᴇʀᴇ ʏᴏᴜʀ I'd",
+            "required": true,
+            "value": "6762113050"
+        },
+        "BOT_TOKEN": {
+            "description": "ғɪʟʟ ᴡɪᴛʜ ʏᴏᴜʀ ʙᴏᴛ ᴛᴏᴋᴇɴ ɢᴇᴛ ғʀᴏᴍ @BotFather ᴏɴ ᴛᴇʟᴇɢʀᴀᴍ",
+            "required": true,
+            "value": ""
+        }
+
+    }
+  }
