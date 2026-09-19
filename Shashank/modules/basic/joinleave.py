@@ -4,20 +4,32 @@ from pyrogram import Client, enums, filters
 from pyrogram.types import Message
 from Shashank.modules.help import add_command_help
 
+
 @Client.on_message(filters.command(["join"], ".") & filters.me)
 async def join(client: Client, message: Message):
     tex = message.command[1] if len(message.command) > 1 else message.chat.id
+
     # VcFight compatibility: a numeric group id means join its active voice chat.
     if len(message.command) > 1 and str(tex).lstrip("-").isdigit():
         try:
             from Shashank.modules.basic.vcfight import _join
-            premium = __import__("Shashank.modules.basic.vcfight", fromlist=["_subscription_active"])._subscription_active(client)
             await _join(client, int(tex))
-            if premium:
-                return await message.reply_text(f"✅ **VC joined**\nGroup: `{tex}`\n\nPremium: multiple VCs enabled.")
-            return await message.reply_text(f"✅ **VC joined**\nGroup: `{tex}`\n\nFree: only one VC at a time.")
+            active, _ = await __import__(
+                "Shashank.modules.basic.vcfight",
+                fromlist=["_subscription_active"]
+            )._subscription_active(client)
+            if active:
+                note = "Premium: multiple VCs allowed."
+            else:
+                note = "Free: only one VC at a time."
+            return await message.reply_text(
+                f"✅ **VC joined**\nGroup: `{tex}`\n\n{note}"
+            )
+        except PermissionError as ex:
+            return await message.reply_text(f"💎 **Subscription Required**\n\n{ex}")
         except Exception as ex:
             return await message.reply_text(f"❌ **VC join failed:** `{ex}`")
+
     g = await message.reply_text("`ᴘʀᴏᴄᴇssɪɴɢ...`")
     try:
         await client.join_chat(tex)
@@ -36,13 +48,16 @@ async def leave(client: Client, message: Message):
             async with state.lock:
                 if int(xd) == state.current:
                     await _cancel_fight(state)
-                try: await call.leave_call(int(xd))
-                except Exception: pass
+                try:
+                    await call.leave_call(int(xd))
+                except Exception:
+                    pass
                 state.joined.discard(int(xd))
                 state.current = next(iter(state.joined), None)
             return await message.reply_text(f"🚪 VC left: `{xd}`")
         except Exception as ex:
             return await message.reply_text(f"❌ **VC leave failed:** `{ex}`")
+
     xv = await message.reply_text("`ᴘʀᴏᴄᴇssɪɴɢ...`")
     try:
         await xv.edit_text(f"{client.me.first_name} ʜᴀs ʟᴇғᴛ ᴛʜɪs ɢʀᴏᴜᴘ, ʙʏᴇ!!")
@@ -71,11 +86,11 @@ async def kickmeall(client: Client, message: Message):
 
 @Client.on_message(filters.command(["leaveallch"], ".") & filters.me)
 async def kickmeallch(client: Client, message: Message):
-    ok = await message.reply_text("`ɢʟᴏʙᴀʟ ʟᴇᴀᴠᴇ ғʀᴏᴍ ɢʀᴏᴜᴘ ᴄʜᴀᴛs...`")
+    ok = await message.reply_text("`ɢʟᴏʙᴀʟ ʟᴇᴀᴠᴇ ғʀᴏᴍ ᴄʜᴀɴɴᴇʟs...`")
     er = 0
     done = 0
     async for dialog in client.get_dialogs():
-        if dialog.chat.type in (enums.ChatType.CHANNEL):
+        if dialog.chat.type in (enums.ChatType.CHANNEL,):
             chat = dialog.chat.id
             try:
                 done += 1
@@ -90,10 +105,7 @@ async def kickmeallch(client: Client, message: Message):
 add_command_help(
     "joinleave",
     [
-        [
-            "kickme",
-            "To leave!!.",
-        ],
+        ["kickme", "To leave!!."],
         ["leaveallgc", "to leave all groups where you joined."],
         ["leaveallch", "to leaveall channel where you joined."],
         ["join [Username]", "give an specific username to join."],
