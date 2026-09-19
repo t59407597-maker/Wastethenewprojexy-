@@ -1,10 +1,8 @@
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from Shashank import app, CMD_HELP, SUDO_USER
-from Shashank.helper.PyroHelpers import ReplyCheck
-from Shashank.helper.utility import split_list
 
-HELP_MENU = r"""| ❁ ＷＡＳＴＥ Ｘ ＵＢＯＴ - ＨＥＬＰ ＭＥＮＵ ❁ |
+HELP_MENU = r"""<blockquote>| ❁ ＷＡＳＴＥ Ｘ ＵＢＯＴ - ＨＥＬＰ ＭＥＮＵ ❁ |
 +-----------------------+------------------------+
 | Autopic               | admin                  |
 | afk                   | animation              |
@@ -37,7 +35,7 @@ HELP_MENU = r"""| ❁ ＷＡＳＴＥ Ｘ ＵＢＯＴ - ＨＥＬＰ ＭＥＮ�
 | weather               | VcFight                |
 | promotion             | None                   |
 +-----------------------+------------------------+
-• @II_JPEXO_II × @JP_NETWORK ."""
+• @II_JPEXO_II × @JP_NETWORK .</blockquote>"""
 
 
 def _find_help_key(name: str):
@@ -48,38 +46,60 @@ def _find_help_key(name: str):
     return None
 
 
-@Client.on_message(filters.command(["help", "helpme"], ".") & (filters.me | filters.user(SUDO_USER)))
+@Client.on_message(
+    filters.command(["help", "helpme"], ".") & (filters.me | filters.user(SUDO_USER))
+)
 async def module_help(client: Client, message: Message):
     cmd = message.command
     help_arg = " ".join(cmd[1:]).strip() if len(cmd) > 1 else ""
+
     if not help_arg:
-        return await message.reply_text(HELP_MENU)
+        return await message.reply_text(
+            HELP_MENU, parse_mode=enums.ParseMode.HTML
+        )
 
     key = _find_help_key(help_arg)
     if key:
         commands = CMD_HELP[key]
         this_command = f"──「 **Help For {str(key).upper()}** 」──\n\n"
         for x in commands:
-            this_command += f"  • **Command:** `.{str(x)}`\n  • **Function:** `{str(commands[x])}`\n\n"
-        return await message.reply_text(this_command, parse_mode=enums.ParseMode.MARKDOWN)
+            this_command += (
+                f"  • **Command:** `.{str(x)}`\n"
+                f"  • **Function:** `{str(commands[x])}`\n\n"
+            )
+        return await message.reply_text(
+            this_command, parse_mode=enums.ParseMode.MARKDOWN
+        )
+
     await message.reply_text(f"`{help_arg}` **Not a Valid Module Name.**")
 
 
 async def module_helper(client: Client, message: Message):
     help_arg = ""
+
     if message.reply_to_message and message.reply_to_message.text:
         help_arg = message.reply_to_message.text.strip()
     elif len(message.command) > 1:
         help_arg = " ".join(message.command[1:]).strip()
+
     if not help_arg:
-        return await message.reply_text(HELP_MENU)
+        return await message.reply_text(
+            HELP_MENU, parse_mode=enums.ParseMode.HTML
+        )
+
     key = _find_help_key(help_arg)
     if key:
         commands = CMD_HELP[key]
         this_command = f"──「 **Help For {str(key).upper()}** 」──\n\n"
         for x in commands:
-            this_command += f"  • **Command:** `.{str(x)}`\n  • **Function:** `{str(commands[x])}`\n\n"
-        return await message.reply_text(this_command, parse_mode=enums.ParseMode.MARKDOWN)
+            this_command += (
+                f"  • **Command:** `.{str(x)}`\n"
+                f"  • **Function:** `{str(commands[x])}`\n\n"
+            )
+        return await message.reply_text(
+            this_command, parse_mode=enums.ParseMode.MARKDOWN
+        )
+
     await message.reply_text(f"`{help_arg}` **Not a Valid Module Name.**")
 
 
