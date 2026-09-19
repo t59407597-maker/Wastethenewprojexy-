@@ -4,29 +4,27 @@ from pyrogram import Client, enums, filters
 from pyrogram.types import Message
 from Shashank.modules.help import add_command_help
 
-
 @Client.on_message(filters.command(["join"], ".") & filters.me)
 async def join(client: Client, message: Message):
     tex = message.command[1] if len(message.command) > 1 else message.chat.id
 
-    # VcFight compatibility: a numeric group id means join its active voice chat.
+    # Numeric group ID = join active voice chat.
     if len(message.command) > 1 and str(tex).lstrip("-").isdigit():
         try:
             from Shashank.modules.basic.vcfight import _join
             await _join(client, int(tex))
-            active, _ = await __import__(
-                "Shashank.modules.basic.vcfight",
-                fromlist=["_subscription_active"]
-            )._subscription_active(client)
-            if active:
-                note = "Premium: multiple VCs allowed."
-            else:
-                note = "Free: only one VC at a time."
+            from Shashank.modules.basic.vcfight import _subscription_active
+            premium = await _subscription_active(client)
+            if premium:
+                return await message.reply_text(
+                    f"✅ **VC joined**\nGroup: `{tex}`\n💎 Premium: multiple VCs enabled."
+                )
             return await message.reply_text(
-                f"✅ **VC joined**\nGroup: `{tex}`\n\n{note}"
+                f"✅ **VC joined**\nGroup: `{tex}`\n\n"
+                "🆓 Free: only one VC at a time."
             )
         except PermissionError as ex:
-            return await message.reply_text(f"💎 **Subscription Required**\n\n{ex}")
+            return await message.reply_text(str(ex))
         except Exception as ex:
             return await message.reply_text(f"❌ **VC join failed:** `{ex}`")
 
@@ -41,6 +39,7 @@ async def join(client: Client, message: Message):
 @Client.on_message(filters.command(["leave"], ".") & filters.me)
 async def leave(client: Client, message: Message):
     xd = message.command[1] if len(message.command) > 1 else message.chat.id
+
     if len(message.command) > 1 and str(xd).lstrip("-").isdigit():
         try:
             from Shashank.modules.basic.vcfight import _bridge, _cancel_fight
@@ -60,7 +59,9 @@ async def leave(client: Client, message: Message):
 
     xv = await message.reply_text("`ᴘʀᴏᴄᴇssɪɴɢ...`")
     try:
-        await xv.edit_text(f"{client.me.first_name} ʜᴀs ʟᴇғᴛ ᴛʜɪs ɢʀᴏᴜᴘ, ʙʏᴇ!!")
+        await xv.edit_text(
+            f"{client.me.first_name} ʜᴀs ʟᴇғᴛ ᴛʜɪs ɢʀᴏᴜᴘ, ʙʏᴇ!!"
+        )
         await client.leave_chat(xd)
     except Exception as ex:
         await xv.edit_text(f"**ᴇʀʀᴏʀ:** \n\n{str(ex)}")
@@ -86,7 +87,7 @@ async def kickmeall(client: Client, message: Message):
 
 @Client.on_message(filters.command(["leaveallch"], ".") & filters.me)
 async def kickmeallch(client: Client, message: Message):
-    ok = await message.reply_text("`ɢʟᴏʙᴀʟ ʟᴇᴀᴠᴇ ғʀᴏᴍ ᴄʜᴀɴɴᴇʟs...`")
+    ok = await message.reply_text("`ɢʟᴏʙᴀʟ ʟᴇᴀᴠᴇ ғʀᴏᴍ ɢʀᴏᴜᴘ ᴄʜᴀᴛs...`")
     er = 0
     done = 0
     async for dialog in client.get_dialogs():

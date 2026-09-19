@@ -1,97 +1,84 @@
 from datetime import datetime, timezone
-
-from pyrogram import Client, enums, filters
-from pyrogram.types import Message
-
-from Shashank.modules.help import add_command_help
+from pyrogram import Client, filters
 from Shashank.modules.bot.start import subscriptions_col, OWNER_USERNAME
+from Shashank.modules.help import add_command_help
 
+_ALLOWED = {"👍", "❤️", "🔥", "😍", "😂", "😢", "😡", "🤯", "👏", "🎉", "💯", "👀"}
 
-_ALLOWED_REACTIONS = {"👍", "❤️", "🔥", "😍", "😂", "😢", "😡", "🤯", "👏", "🎉", "💯", "👀"}
-
-
-def _uid(client):
-    return getattr(client, "_waste_owner_uid", None)
-
-
-def _subscription(client):
-    uid = _uid(client)
-    if not uid:
-        return None
-    try:
-        doc = subscriptions_col.find_one({"_id": int(uid)})
-        if not doc:
-            return None
-        expires = doc.get("expires_at")
-        if not isinstance(expires, datetime):
-            return None
+def _active(uid):
+    doc = subscriptions_col.find_one({"_id": int(uid)})
+    if not doc:
+        return False
+    expires = doc.get("expires_at")
+    if isinstance(expires, datetime):
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
-        if expires <= datetime.now(timezone.utc):
+        if expires > datetime.now(timezone.utc):
+            return True
+        try:
             subscriptions_col.delete_one({"_id": int(uid)})
-            return None
-        return doc
-    except Exception:
-        return None
-
+        except Exception:
+            pass
+    return False
 
 @Client.on_message(filters.command("autoreact", ".") & filters.me)
-async def autoreact_command(client: Client, message: Message):
-    doc = _subscription(client)
-    if not doc:
-        return await message.reply_text(
-            "🔒 **Premium Required**\n\n"
-            f"Auto Reaction use karne ke liye active subscription chahiye.\n"
-            f"Subscription ke liye @{OWNER_USERNAME} ko DM kare."
+async def autoreact_command(client, message):
+    uid = getattr(client, "_waste_owner_uid", None)
+    if not uid:
+        try:
+            uid = client.me.id if client.me else None
+        except Exception:
+            uid = None
+
+    if not uid or not _active(uid):
+        return await message.reply(
+            "💎 **Subscription Required**\n\n"
+            f"Contact owner: @{OWNER_USERNAME}"
         )
 
-    if len(message.command) < 2 or message.command[1].lower() == "status":
-        enabled = bool(doc.get("auto_reaction_enabled"))
-        emoji = doc.get("auto_reaction_emoji", "👍")
-        return await message.reply_text(
+    args = message.command[1:]
+    enabled = bool(getattr(client, "_auto_react_enabled", False))
+    emoji = getattr(client, "_auto_react_emoji", "👍")
+
+    if not args or args[0].lower() == "status":
+        return await message.reply(
             f"⚡ **Auto Reaction:** {'ON' if enabled else 'OFF'}\n"
-            f"Reaction: {emoji}\n\n"
-            "Use: `.autoreact on [emoji]` / `.autoreact off`"
+            f"Reaction: {emoji}"
         )
 
-    action = message.command[1].lower()
+    action = args[0].lower()
     if action == "off":
-        subscriptions_col.update_one(
-            {"_id": int(_uid(client))},
-            {"$set": {"auto_reaction_enabled": False}},
-        )
-        return await message.reply_text("🛑 **Auto Reaction disabled.**")
+        client._auto_react_enabled = False
+        return await message.reply("⚡ **Auto Reaction disabled.**")
 
-    if action != "on":
-        return await message.reply_text("Usage: `.autoreact on [emoji]` / `.autoreact off`")
+    if action == "on":
+        chosen = args[1] if len(args) > 1 else "👍"
+        if chosen not in _ALLOWED:
+            return await message.reply(
+                "❌ Unsupported reaction.\n"
+                "Allowed: " + " ".join(sorted(_ALLOWED))
+            )
+        client._auto_react_enabled = True
+        client._auto_react_emoji = chosen
+        return await message.reply(f"⚡ **Auto Reaction enabled:** {chosen}")
 
-    emoji = message.command[2] if len(message.command) > 2 else doc.get("auto_reaction_emoji", "👍")
-    if emoji not in _ALLOWED_REACTIONS:
-        return await message.reply_text(
-            "❌ Unsupported reaction. Use one of: " + " ".join(sorted(_ALLOWED_REACTIONS))
-        )
-
-    subscriptions_col.update_one(
-        {"_id": int(_uid(client))},
-        {"$set": {"auto_reaction_enabled": True, "auto_reaction_emoji": emoji}},
+    return await message.reply(
+        "Usage: `.autoreact on [emoji]`, `.autoreact off`, `.autoreact status`"
     )
-    await message.reply_text(f"✅ **Auto Reaction enabled:** {emoji}")
 
 
-@Client.on_message((filters.group | filters.channel) & ~filters.me, group=98)
-async def auto_react_handler(client: Client, message: Message):
-    doc = _subscription(client)
-    if not doc or not doc.get("auto_reaction_enabled"):
+@Client.on_message((filters.group | filters.channel) & ~filters.me)
+async def auto_react_watcher(client, message):
+    if not getattr(client, "_auto_react_enabled", False):
         return
-    emoji = doc.get("auto_reaction_emoji", "👍")
+    emoji = getattr(client, "_auto_react_emoji", "👍")
     try:
         await message.react(emoji)
     except Exception:
-        # Reactions are cosmetic; never let a reaction failure affect the userbot.
-        return
+        pass
 
 
-add_command_help("Promotion", [
-    ["promotion", "Premium promotion feature. Requires an active 30-day subscription."],
-    ["autoreact", "Premium only: `.autoreact on [emoji]` / `.autoreact off` for automatic reactions."],
-])
+add_command_help(
+    "Promotion",
+    [["autoreact", "Premium-only auto reaction: `.autoreact on [emoji]` / `.autoreact off`."]],
+)

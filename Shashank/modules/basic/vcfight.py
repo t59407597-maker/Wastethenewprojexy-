@@ -1,10 +1,9 @@
 import asyncio
 import logging
 import os
-import random
-import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from pyrogram import Client, filters
@@ -14,10 +13,16 @@ from pytgcalls import PyTgCalls
 from pytgcalls.types import GroupCallConfig
 
 from Shashank.modules.help import add_command_help
+from Shashank.modules.bot.start import subscriptions_col, OWNER_USERNAME
 
 log = logging.getLogger(__name__)
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Number of VC join attempts that can run at the same time.
+# There is NO total VC-count cap for premium users; this only controls simultaneous network work.
+# No total VC-count limit for premium .allvc.
+_SUB_CACHE_TTL = 5.0
 
 
 @dataclass
@@ -33,10 +38,64 @@ class VCState:
 
 _states: Dict[int, VCState] = {}
 _bridges: Dict[int, PyTgCalls] = {}
+_sub_cache: Dict[int, tuple] = {}
 
 
 def _key(client: Client) -> int:
     return id(client)
+
+
+async def _subscription_active(client: Client) -> bool:
+    """Cached premium check so repeated VC commands don't block on Mongo."""
+    key = _key(client)
+    now = asyncio.get_running_loop().time()
+    cached = _sub_cache.get(key)
+    if cached and now - cached[0] < _SUB_CACHE_TTL:
+        return cached[1]
+
+    uid = getattr(client, "_waste_owner_uid", None)
+    if not uid:
+        # Main owner/self account is not automatically treated as premium.
+        # Subscription is checked from the same collection as /subscription.
+        try:
+            uid = client.me.id if client.me else None
+        except Exception:
+            uid = None
+
+    active = False
+    if uid:
+        def check():
+            doc = subscriptions_col.find_one({"_id": int(uid)})
+            if not doc:
+                return False
+            expires = doc.get("expires_at")
+            if isinstance(expires, datetime):
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires > datetime.now(timezone.utc):
+                    return True
+                try:
+                    subscriptions_col.delete_one({"_id": int(uid)})
+                except Exception:
+                    pass
+            return False
+
+        try:
+            active = await asyncio.to_thread(check)
+        except Exception:
+            active = False
+
+    _sub_cache[key] = (now, active)
+    return active
+
+
+def _premium_message():
+    return (
+        "💎 **Subscription Required**\n\n"
+        "Free users can join only **one VC** at a time.\n"
+        f"Multiple VC / `.allvc` ke liye subscription chahiye.\n\n"
+        f"Contact owner: @{OWNER_USERNAME}"
+    )
 
 
 async def _bridge(client: Client):
@@ -50,20 +109,6 @@ async def _bridge(client: Client):
         await call.start()
         state.started = True
     return state, call
-
-
-async def _subscription_active(client: Client):
-    """Return (active, owner_username) without blocking the event loop."""
-    try:
-        from Shashank.modules.bot.start import _sub_active, OWNER_USERNAME
-        uid = getattr(client, "_waste_owner_uid", None)
-        if uid is None:
-            me = await client.get_me()
-            uid = me.id
-        active, _ = await asyncio.to_thread(_sub_active, int(uid))
-        return active, OWNER_USERNAME
-    except Exception:
-        return False, "II_JPEXO_II"
 
 
 async def _duration(path: str) -> float:
@@ -101,7 +146,9 @@ async def _fight_loop(state: VCState, call: PyTgCalls, target: int, path: str):
             if not os.path.exists(path):
                 raise FileNotFoundError(path)
             duration = await _duration(path)
-            await call.play(target, path, config=GroupCallConfig(auto_start=False))
+            await call.play(
+                target, path, config=GroupCallConfig(auto_start=False)
+            )
             await asyncio.sleep(max(1.0, duration - 0.25))
     except asyncio.CancelledError:
         raise
@@ -118,30 +165,36 @@ async def _fight_loop(state: VCState, call: PyTgCalls, target: int, path: str):
 
 
 async def _join(client: Client, chat_id: int):
-    """Join one VC for free users; premium users can keep multiple VCs."""
+    """Join one VC. Free accounts are limited to one active VC."""
     state, call = await _bridge(client)
-    active, owner = await _subscription_active(client)
 
     async with state.lock:
-        # Free users are limited to one VC. Do not switch automatically:
-        # attempting another VC requires subscription.
-        if not active and state.joined and chat_id not in state.joined:
-            raise PermissionError(
-                f"Subscription required for multiple VCs.\n"
-                f"Contact @{owner} to activate your subscription."
-            )
+        already_joined = chat_id in state.joined
+        premium = await _subscription_active(client)
 
-        await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
+        if not premium and state.joined and not already_joined:
+            raise PermissionError(_premium_message())
+
+        # Do not unnecessarily call PyTgCalls again for an already joined VC.
+        if already_joined:
+            state.current = chat_id
+            return
+
+        await call.play(
+            chat_id, None, config=GroupCallConfig(auto_start=False)
+        )
         state.joined.add(chat_id)
         state.current = chat_id
 
 
-async def _join_one(call, chat_id: int):
+async def _join_one(call: PyTgCalls, chat_id: int):
     try:
-        await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
+        await call.play(
+            chat_id, None, config=GroupCallConfig(auto_start=False)
+        )
         return chat_id, True
-    except Exception:
-        return chat_id, False
+    except Exception as exc:
+        return chat_id, exc
 
 
 @Client.on_message(filters.command("allvc", ".") & filters.me)
@@ -149,24 +202,17 @@ async def all_vc(client: Client, message: Message):
     if len(message.command) < 2 or message.command[1].lower() not in {"join", "leave"}:
         return await message.reply("Usage: `.allvc join` / `.allvc leave`")
 
-    active, owner = await _subscription_active(client)
-    if not active:
-        return await message.reply(
-            f"💎 **Subscription Required**\n\n"
-            f"` .allvc {message.command[1].lower()} ` is available for subscribed users.\n"
-            f"Contact @{owner} to activate your subscription."
-        )
+    premium = await _subscription_active(client)
+    if not premium:
+        return await message.reply(_premium_message())
 
     state, call = await _bridge(client)
     action = message.command[1].lower()
 
     if action == "leave":
-        status = await message.reply("🚪 **I am leaving all joined VC...**")
         async with state.lock:
             await _cancel_fight(state)
-            joined_ids = list(state.joined)
-            state.joined.clear()
-            state.current = None
+            joined = list(state.joined)
 
         async def leave_one(chat_id):
             try:
@@ -175,66 +221,87 @@ async def all_vc(client: Client, message: Message):
             except Exception:
                 return False
 
-        results = await asyncio.gather(*(leave_one(x) for x in joined_ids), return_exceptions=True)
-        left = sum(r is True for r in results)
-        return await status.edit(f"🚪 **ALL VC LEAVE DONE**\nLeft: `{left}`")
+        results = await asyncio.gather(
+            *(leave_one(chat_id) for chat_id in joined),
+            return_exceptions=False,
+        )
+        left = sum(results)
 
-    # Give immediate feedback before scanning/connecting to dialogs.
+        async with state.lock:
+            state.joined.clear()
+            state.current = None
+
+        return await message.reply(f"🚪 Left `{left}` VC(s).")
+
+    # Reply immediately so the user does not wait for dialog scanning.
     status = await message.reply("🔊 **I am joining all active VC...**")
 
-    dialogs = []
+    chat_ids = []
+    seen = set()
     async for dialog in client.get_dialogs():
         chat = dialog.chat
         if not chat:
             continue
         chat_type = getattr(chat.type, "value", chat.type)
-        if chat_type in (ChatType.GROUP.value, ChatType.SUPERGROUP.value):
-            dialogs.append(chat.id)
+        if chat_type not in (ChatType.GROUP.value, ChatType.SUPERGROUP.value):
+            continue
+        if chat.id not in seen:
+            seen.add(chat.id)
+            chat_ids.append(chat.id)
 
-    # A small concurrency limit keeps Telegram/PyTgCalls stable while
-    # making all-vc joining noticeably faster than sequential calls.
-    sem = asyncio.Semaphore(5)
-
-    async def join_limited(chat_id):
-        async with sem:
-            return await _join_one(call, chat_id)
-
-    results = await asyncio.gather(*(join_limited(x) for x in dialogs), return_exceptions=True)
-    ok = 0
-    failed = 0
-    for result in results:
-        if isinstance(result, tuple) and result[1]:
-            state.joined.add(result[0])
-            state.current = result[0]
-            ok += 1
-        else:
-            failed += 1
-
-    await status.edit(
-        f"✅ **ALL VC JOIN DONE**\n"
-        f"Joined: `{ok}`\n"
-        f"Failed/No active VC: `{failed}`"
+    # Premium has no application-level VC count limit.
+    # Launch all discovered VC join attempts concurrently.
+    results = await asyncio.gather(
+        *(_join_one(call, chat_id) for chat_id in chat_ids),
+        return_exceptions=False,
     )
+
+    ok_ids = [chat_id for chat_id, result in results if result is True]
+    failed = len(results) - len(ok_ids)
+
+    async with state.lock:
+        state.joined.update(ok_ids)
+        if ok_ids:
+            state.current = ok_ids[-1]
+
+    try:
+        await status.edit(
+            "✅ **ALL VC JOIN DONE**\n"
+            f"Joined: `{len(ok_ids)}`\n"
+            f"Failed/No active VC: `{failed}`"
+        )
+    except Exception:
+        pass
 
 
 @Client.on_message(filters.command("fight", ".") & filters.me)
 async def fight(client: Client, message: Message):
     state, call = await _bridge(client)
-    if not state.current:
-        return await message.reply("❌ Pehle `.join <group_id>` karke VC join karo.")
-    if message.chat and message.chat.id != state.current:
+
+    if not state.joined:
         return await message.reply(
-            f"❌ Fighting selected VC wale group me chalegi.\nSelected group: `{state.current}`"
+            "❌ Pehle `.join <group_id>` karke VC join karo."
         )
+
+    # The group where .fight is sent becomes the selected VC.
+    if message.chat and message.chat.id in state.joined:
+        state.current = message.chat.id
+
+    if not state.current:
+        return await message.reply("❌ No selected VC.")
+
     replied = message.reply_to_message
     if not replied or not (replied.audio or replied.voice):
-        return await message.reply("❌ `.fight` ko audio/voice message ke reply me bhejo.")
+        return await message.reply(
+            "❌ `.fight` ko audio/voice message ke reply me bhejo."
+        )
 
     status = await message.reply("⬇️ Audio download ho raha hai…")
     path = os.path.join(
         DOWNLOAD_DIR,
         f"fight_{uuid.uuid4().hex}{'.ogg' if replied.voice else '.mp3'}",
     )
+
     try:
         await replied.download(file_name=path)
         async with state.lock:
@@ -244,6 +311,7 @@ async def fight(client: Client, message: Message):
             state.fight_task = asyncio.create_task(
                 _fight_loop(state, call, state.current, path)
             )
+
         await status.edit(
             "🔥 **FIGHT started**\n"
             "Audio repeat hoga. `.fightstop` se stop hoga; account VC me rahega."
@@ -269,6 +337,7 @@ async def fight_stop(client: Client, message: Message):
                 pass
         await _cancel_fight(state)
         state.fight_file = None
+
     await message.reply("🛑 **Fight audio stopped.** Account VC me connected hai.")
 
 
@@ -276,11 +345,13 @@ async def fight_stop(client: Client, message: Message):
 async def vcleave(client: Client, message: Message):
     state, call = await _bridge(client)
     target = state.current
+
     if len(message.command) > 1:
         try:
             target = int(message.command[1])
         except ValueError:
             return await message.reply("❌ Group ID must be a number.")
+
     if target is None:
         return await message.reply("ℹ️ No selected VC.")
 
@@ -293,13 +364,17 @@ async def vcleave(client: Client, message: Message):
             pass
         state.joined.discard(target)
         state.current = next(iter(state.joined), None)
+
     await message.reply(f"🚪 VC left: `{target}`")
 
 
 @Client.on_message(filters.command("vcstatus", ".") & filters.me)
 async def vc_status(client: Client, message: Message):
     state, _ = await _bridge(client)
-    joined = "\n".join(f"• `{x}`" for x in list(state.joined)[:50]) or "• None"
+    joined = "\n".join(
+        f"• `{x}`" for x in list(state.joined)[:50]
+    ) or "• None"
+
     await message.reply(
         f"📊 **VC Fighter Status**\n\n"
         f"Current VC: `{state.current}`\n"
@@ -309,14 +384,11 @@ async def vc_status(client: Client, message: Message):
     )
 
 
-add_command_help(
-    "VcFight",
-    [
-        ["join", "Join a specific active voice chat: `.join <group_id>`"],
-        ["allvc", "Premium: join or leave all active voice chats."],
-        ["fight", "Reply to an audio/voice and repeat it in the selected VC."],
-        ["fightstop", "Stop fight audio without leaving the VC."],
-        ["vcleave", "Leave the selected VC without using the normal chat-leave command."],
-        ["vcstatus", "Show selected/joined VCs and fight status."],
-    ],
-)
+add_command_help("VcFight", [
+    ["join", "Join one active VC: `.join <group_id>` (free) / multiple VCs (premium)."],
+    ["allvc", "Premium only: `.allvc join` / `.allvc leave` all active VCs."],
+    ["fight", "Reply to an audio/voice and repeat it in the selected VC."],
+    ["fightstop", "Stop fight audio without leaving the VC."],
+    ["vcleave", "Leave the selected VC."],
+    ["vcstatus", "Show selected/joined VCs and fight status."],
+])
