@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from pyrogram import Client, filters
+from pyrogram.raw.functions.channels import GetFullChannel
+from pyrogram.raw.functions.messages import GetFullChat
+from pyrogram.raw.types import InputPeerChannel, InputPeerChat
 from pyrogram.enums import ChatType
 from pyrogram.types import Message
 from pytgcalls import PyTgCalls
@@ -187,6 +190,20 @@ async def _join(client: Client, chat_id: int):
         state.current = chat_id
 
 
+async def _has_active_vc(client, chat_id):
+    """Check Telegram's full-chat data for a currently active voice chat."""
+    try:
+        peer = await client.resolve_peer(chat_id)
+        if isinstance(peer, InputPeerChannel):
+            full = await client.invoke(GetFullChannel(channel=peer))
+        elif isinstance(peer, InputPeerChat):
+            full = await client.invoke(GetFullChat(chat_id=peer.chat_id))
+        else:
+            return False
+        return bool(getattr(full.full_chat, "call", None))
+    except Exception:
+        return False
+
 async def _join_one(call: PyTgCalls, chat_id: int):
     try:
         await call.play(
@@ -249,15 +266,27 @@ async def all_vc(client: Client, message: Message):
             seen.add(chat.id)
             chat_ids.append(chat.id)
 
+    # Check every group for an actually active VC in parallel.
+    # This avoids wasting join attempts on inactive groups and catches all
+    # active VCs visible to this account.
+    active_flags = await asyncio.gather(
+        *(_has_active_vc(client, chat_id) for chat_id in chat_ids),
+        return_exceptions=True,
+    )
+    active_ids = [
+        chat_id for chat_id, active in zip(chat_ids, active_flags)
+        if active is True
+    ]
+
     # Premium has no application-level VC count limit.
-    # Launch all discovered VC join attempts concurrently.
+    # Launch every detected active VC join attempt concurrently.
     results = await asyncio.gather(
-        *(_join_one(call, chat_id) for chat_id in chat_ids),
+        *(_join_one(call, chat_id) for chat_id in active_ids),
         return_exceptions=False,
     )
 
     ok_ids = [chat_id for chat_id, result in results if result is True]
-    failed = len(results) - len(ok_ids)
+    failed = len(active_ids) - len(ok_ids)
 
     async with state.lock:
         state.joined.update(ok_ids)
