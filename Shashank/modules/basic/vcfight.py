@@ -56,6 +56,33 @@ _bridges: Dict[int, PyTgCalls] = {}
 _sub_cache: Dict[int, tuple] = {}
 
 
+def _vc_chat_map(client: Client) -> dict:
+    """Per-VC text destinations. These are deliberately separate from the VC group chat."""
+    value = getattr(client, "_vc_chat_map", None)
+    if not isinstance(value, dict):
+        value = {}
+        setattr(client, "_vc_chat_map", value)
+    return value
+
+
+def _load_vc_chat_map(client: Client):
+    uid = getattr(client, "_waste_owner_uid", None)
+    if not uid:
+        return
+    try:
+        doc = settings_col.find_one({"_id": int(uid)}) or {}
+        raw = doc.get("vc_chat_map", {})
+        if isinstance(raw, dict):
+            _vc_chat_map(client).update({str(k): int(v) for k, v in raw.items()})
+    except Exception:
+        pass
+
+
+def _vc_destination(client: Client, vc_id: int) -> Optional[int]:
+    target = _vc_chat_map(client).get(str(vc_id))
+    return int(target) if target is not None else None
+
+
 def _key(client: Client) -> int:
     return id(client)
 
@@ -191,6 +218,7 @@ async def _join(client: Client, chat_id: int, retries: int = 4):
                 await call.play(chat_id, None, config=GroupCallConfig(auto_start=False))
                 state.joined.add(chat_id)
                 state.current = chat_id
+                _load_vc_chat_map(client)
                 _start_chat_task(client, chat_id, state)
                 return True
             except Exception as exc:
@@ -228,26 +256,34 @@ async def _active_group_ids(client: Client):
 
 
 async def _vc_chat_loop(client: Client, chat_id: int, state: VCState):
-    """One message/reaction sequence per joined VC, starting immediately after join."""
+    """Send the VC automation sequence ONLY to the separately configured VC chat."""
     try:
-        started = asyncio.get_running_loop().time()
-        index = 0
-        while chat_id in state.joined:
-            elapsed = asyncio.get_running_loop().time() - started
-            while index + 1 < len(CHAT_SEQUENCE) and elapsed >= CHAT_SEQUENCE[index + 1][0]:
-                index += 1
-            text = CHAT_SEQUENCE[index][1]
+        destination = _vc_destination(client, chat_id)
+        if destination is None:
+            log.info("No separate VC chat configured for %s; VC chat automation skipped.", chat_id)
+            return
+
+        for minute, text in CHAT_SEQUENCE:
+            if chat_id not in state.joined:
+                return
+            if minute:
+                await asyncio.sleep(60)
+            if chat_id not in state.joined:
+                return
             try:
-                await client.send_message(chat_id, text)
+                await client.send_message(destination, text)
             except Exception as exc:
-                log.debug("VC chat message failed in %s: %s", chat_id, exc)
-            await asyncio.sleep(_CHAT_INTERVAL)
-            # After the scripted first 8 minutes, keep sending a random reaction every minute.
-            if index >= len(CHAT_SEQUENCE) - 1:
-                try:
-                    await client.send_message(chat_id, random.choice(REACTION_POOL))
-                except Exception:
-                    pass
+                log.debug("VC chat message failed in %s -> %s: %s", chat_id, destination, exc)
+
+        # From minute 8 onward: exactly one reaction/message every minute.
+        while chat_id in state.joined:
+            await asyncio.sleep(60)
+            if chat_id not in state.joined:
+                return
+            try:
+                await client.send_message(destination, random.choice(REACTION_POOL))
+            except Exception as exc:
+                log.debug("VC reaction failed in %s -> %s: %s", chat_id, destination, exc)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -291,6 +327,7 @@ async def _allvc_scanner(client: Client, state: VCState, call: PyTgCalls):
                         if result is True:
                             state.joined.add(chat_id)
                             state.current = chat_id
+                            _load_vc_chat_map(client)
                             _start_chat_task(client, chat_id, state)
             except Exception as exc:
                 log.debug("Automatic VC scan failed: %s", exc)
@@ -328,6 +365,59 @@ async def start_background_for_client(client: Client):
                 await enable_auto_allvc(client)
     except Exception as exc:
         log.debug("Could not start VC background for client: %s", exc)
+
+
+@Client.on_message(filters.command("vcchat", ".") & filters.me)
+async def vc_chat_command(client: Client, message: Message):
+    """Configure a separate Telegram chat where VC automation messages are sent.
+
+    Usage inside the VC's group: .vcchat <destination_chat_id>
+    Disable: .vcchat off
+    """
+    uid = getattr(client, "_waste_owner_uid", None)
+    if not await _subscription_active(client):
+        return await message.reply(_premium_message())
+    args = message.command[1:] if len(message.command) > 1 else []
+    vc_id = message.chat.id if message.chat else None
+    if vc_id is None:
+        return await message.reply("❌ Ye command group ke andar use karo.")
+    if not args:
+        current = _vc_destination(client, vc_id)
+        return await message.reply(
+            f"📡 **VC Chat:** `{current}`" if current else
+            "📡 **VC Chat:** Not configured\n\nUse `.vcchat <chat_id>` to set a separate destination."
+        )
+    if args[0].lower() == "off":
+        _vc_chat_map(client).pop(str(vc_id), None)
+        if uid:
+            settings_col.update_one({"_id": int(uid)}, {"$unset": {f"vc_chat_map.{vc_id}": ""}}, upsert=True)
+        task = _states.get(_key(client), VCState()).chat_tasks.get(vc_id)
+        if task and not task.done():
+            task.cancel()
+        return await message.reply("🛑 Separate VC chat disabled for this VC.")
+    try:
+        destination = int(args[0])
+    except ValueError:
+        return await message.reply("❌ Chat ID number hona chahiye.")
+    try:
+        await client.get_chat(destination)
+    except Exception as exc:
+        return await message.reply(f"❌ Destination chat access nahi ho raha: `{type(exc).__name__}`")
+    _vc_chat_map(client)[str(vc_id)] = destination
+    if uid:
+        settings_col.update_one(
+            {"_id": int(uid)},
+            {"$set": {f"vc_chat_map.{vc_id}": destination}},
+            upsert=True,
+        )
+    state = _states.get(_key(client))
+    if state and vc_id in state.joined:
+        _start_chat_task(client, vc_id, state)
+    return await message.reply(
+        "✅ **Separate VC Chat set.**\n"
+        f"VC: `{vc_id}`\n"
+        f"Messages will go only to: `{destination}`"
+    )
 
 
 @Client.on_message(filters.command("allvc", ".") & filters.me)
@@ -373,6 +463,7 @@ async def all_vc(client: Client, message: Message):
     )
     ok_ids = [chat_id for chat_id, result in results if result is True]
     async with state.lock:
+        _load_vc_chat_map(client)
         state.joined.update(ok_ids)
         for chat_id in ok_ids:
             _start_chat_task(client, chat_id, state)
@@ -474,4 +565,5 @@ add_command_help("VcFight", [
     ["fightstop", "Stop fight audio without leaving the VC."],
     ["vcleave", "Leave selected VC."],
     ["vcstatus", "Show joined VCs, auto mode and fight status."],
+    ["vcchat", "Set a separate chat for VC automation: `.vcchat <chat_id>` / `.vcchat off`."],
 ])
