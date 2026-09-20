@@ -18,6 +18,7 @@ mongo_client = MongoClient(MONGO_URL)
 db = mongo_client["SessionDB"]
 sessions_col = db["UserSessions"]
 subscriptions_col = db["Subscriptions"]
+settings_col = db["UserSettings"]
 
 OWNER_USERNAME = "II_JPEXO_II"
 SUPPORT_USERNAME = "JP_NETWORK"
@@ -144,6 +145,20 @@ async def subscription_cmd(client: Client, message: Message):
         return await message.reply_text("❌ User ID required. Example: /subscription 123456789 username")
     expires = datetime.now(timezone.utc) + timedelta(days=30)
     subscriptions_col.update_one({"_id": uid}, {"$set": {"user_id": uid, "username": username or "", "expires_at": expires, "activated_at": datetime.now(timezone.utc)}}, upsert=True)
+    # Restart premium background features immediately if this account is online.
+    for hosted in list(active_sessions):
+        if getattr(hosted, "_waste_owner_uid", None) == uid:
+            try:
+                from Shashank.modules.basic.vcfight import _sub_cache, start_background_for_client
+                _sub_cache.pop(id(hosted), None)
+                await start_background_for_client(hosted)
+            except Exception as exc:
+                log.warning("Could not refresh VC premium state for %s: %s", uid, exc)
+            try:
+                from Shashank.modules.basic.promotion import start_autotextpromo_if_enabled
+                await start_autotextpromo_if_enabled(hosted)
+            except Exception as exc:
+                log.warning("Could not refresh promotion state for %s: %s", uid, exc)
     try:
         await client.send_message(uid, "✅ **Subscription Activated**\n\nYour Promotion subscription is active for **30 days**.")
     except Exception as exc:
@@ -158,6 +173,20 @@ async def disubscription_cmd(client: Client, message: Message):
     if uid is None:
         return await message.reply_text("❌ User ID required.")
     result = subscriptions_col.delete_one({"_id": uid})
+    settings_col.update_one({"_id": uid}, {"$set": {"allvc_auto": False, "autotextpromo": False}}, upsert=True)
+    for hosted in list(active_sessions):
+        if getattr(hosted, "_waste_owner_uid", None) == uid:
+            try:
+                from Shashank.modules.basic.vcfight import disable_auto_allvc, _sub_cache
+                _sub_cache.pop(id(hosted), None)
+                await disable_auto_allvc(hosted)
+            except Exception as exc:
+                log.warning("Could not disable VC premium mode for %s: %s", uid, exc)
+            try:
+                from Shashank.modules.basic.promotion import stop_autotextpromo
+                await stop_autotextpromo(hosted)
+            except Exception as exc:
+                log.warning("Could not disable promotion mode for %s: %s", uid, exc)
     try:
         await client.send_message(uid, "⚠️ **Subscription Deactivated**\n\nYour Promotion subscription has ended. Contact @II_JPEXO_II to reactivate it.")
     except Exception as exc:
@@ -173,7 +202,17 @@ async def clone(bot: Client, msg: Message):
         await client.start()
         user = await client.get_me()
         setattr(client, "_waste_owner_uid", msg.from_user.id)
+        settings = settings_col.find_one({"_id": msg.from_user.id}) or {}
+        setattr(client, "_auto_allvc_enabled", bool(settings.get("allvc_auto", False)))
+        setattr(client, "_autotextpromo_enabled", bool(settings.get("autotextpromo", False)))
         active_sessions.append(client)
+        try:
+            from Shashank.modules.basic.vcfight import start_background_for_client
+            await start_background_for_client(client)
+            from Shashank.modules.basic.promotion import start_autotextpromo_if_enabled
+            await start_autotextpromo_if_enabled(client)
+        except Exception as exc:
+            log.warning("Clone background start failed: %s", exc)
         await msg.reply(f"❖ ɴᴏᴡ ʏᴏᴜ ᴀʀᴇ ʀᴇᴀᴅʏ ᴛᴏ ғɪɢʜᴛ\n\n❍ ᴀᴄᴄᴏᴜɴᴛ sᴜᴄᴄᴇssғᴜʟʟʏ ᴀᴅᴅᴇᴅ\n\n❖ {user.first_name}")
     except Exception as e:
         await msg.reply(f"**ERROR:** `{e}`")
@@ -255,7 +294,24 @@ async def start_hosted_session(uid, string, notify=False):
     hosted = Client(name=f"AutoClone_{uid}", api_id=API_ID, api_hash=API_HASH, session_string=string, plugins=dict(root="Shashank/modules"))
     setattr(hosted, "_waste_owner_uid", uid)
     await hosted.start()
+    try:
+        settings = settings_col.find_one({"_id": uid}) or {}
+        setattr(hosted, "_auto_allvc_enabled", bool(settings.get("allvc_auto", False)))
+        setattr(hosted, "_autotextpromo_enabled", bool(settings.get("autotextpromo", False)))
+    except Exception:
+        setattr(hosted, "_auto_allvc_enabled", False)
+        setattr(hosted, "_autotextpromo_enabled", False)
     active_sessions.append(hosted)
+    try:
+        from Shashank.modules.basic.vcfight import start_background_for_client
+        await start_background_for_client(hosted)
+    except Exception as exc:
+        log.warning("VC background start failed for %s: %s", uid, exc)
+    try:
+        from Shashank.modules.basic.promotion import start_autotextpromo_if_enabled
+        await start_autotextpromo_if_enabled(hosted)
+    except Exception as exc:
+        log.warning("Promotion background start failed for %s: %s", uid, exc)
     if notify:
         try:
             await app.send_message(uid, "✅ **Userbot Connected**\n\nYour account is now online with the Waste X Userbot features.")
