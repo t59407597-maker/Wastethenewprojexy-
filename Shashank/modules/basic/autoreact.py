@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 from pyrogram import Client, filters
+import random
 from Shashank.modules.bot.start import subscriptions_col, OWNER_USERNAME
 from Shashank.modules.help import add_command_help
 
-_ALLOWED = {"👍", "❤️", "🔥", "😍", "😂", "😢", "😡", "🤯", "👏", "🎉", "💯", "👀"}
+_ALLOWED = {"👀", "😭", "😂", "😐", "🔥"}
 
 def _active(uid):
     doc = subscriptions_col.find_one({"_id": int(uid)})
@@ -38,7 +39,7 @@ async def autoreact_command(client, message):
 
     args = message.command[1:]
     enabled = bool(getattr(client, "_auto_react_enabled", False))
-    emoji = getattr(client, "_auto_react_emoji", "👍")
+    emoji = getattr(client, "_auto_react_emoji", "👀")
 
     if not args or args[0].lower() == "status":
         return await message.reply(
@@ -52,18 +53,18 @@ async def autoreact_command(client, message):
         return await message.reply("⚡ **Auto Reaction disabled.**")
 
     if action == "on":
-        chosen = args[1] if len(args) > 1 else "👍"
-        if chosen not in _ALLOWED:
+        chosen = args[1] if len(args) > 1 else "random"
+        if chosen != "random" and chosen not in _ALLOWED:
             return await message.reply(
                 "❌ Unsupported reaction.\n"
-                "Allowed: " + " ".join(sorted(_ALLOWED))
+                "Allowed: " + " ".join(sorted(_ALLOWED)) + "\nOr use `.autoreact on random`"
             )
         client._auto_react_enabled = True
         client._auto_react_emoji = chosen
-        return await message.reply(f"⚡ **Auto Reaction enabled:** {chosen}")
+        return await message.reply(f"⚡ **Auto Reaction enabled:** {'random pool' if chosen == 'random' else chosen}")
 
     return await message.reply(
-        "Usage: `.autoreact on [emoji]`, `.autoreact off`, `.autoreact status`"
+        "Usage: `.autoreact on random`, `.autoreact on <emoji>`, `.autoreact off`, `.autoreact status`"
     )
 
 
@@ -71,7 +72,7 @@ async def autoreact_command(client, message):
 async def auto_react_watcher(client, message):
     if not getattr(client, "_auto_react_enabled", False):
         return
-    emoji = getattr(client, "_auto_react_emoji", "👍")
+    emoji = getattr(client, "_auto_react_emoji", "👀")
     try:
         await message.react(emoji)
     except Exception:
